@@ -42,17 +42,32 @@ namespace LAMMPS_NS {
     int setmask();
     void init();
     void post_force(int);
-
+    void post_create();
     void cpl_evaluate(class ComputePairGranLocal *);
     void register_compute_pair_local(ComputePairGranLocal *);
     void unregister_compute_pair_local(ComputePairGranLocal *);
 
+    void altern_updatePtrs();
   private:
     template <int> void post_force_eval(int,int);
 
     class FixPropertyGlobal* fix_conductivity;
-    double *conductivity;
 
+    class FixPropertyAtom* fix_heatCond;
+    class FixPropertyAtom* fix_heatConv;
+    class FixPropertyAtom* fix_heatRadiat;
+    class FixPropertyAtom* fix_heatExtern;
+
+    double *conductivity;
+    //heat fluxes for particles, divided according to their physical nature: 
+    double *conductiveHeatFlux;
+    double *radiativeHeatFlux;
+    double *externalHeatFlux;
+    double *convectiveHeatFlux;
+//NB: it may be a good idea to move heat fluxes declaration to fix_heat_gran.h
+
+//    double T_ext; //boundary temparature for external heat exchange, [K]
+    double cond_fluid; //thermal conductivity of interstitial fluid (optional), [W/(m*K)] 
     // for heat transfer area correction
     int area_correction_flag;
     double const* const* deltan_ratio;

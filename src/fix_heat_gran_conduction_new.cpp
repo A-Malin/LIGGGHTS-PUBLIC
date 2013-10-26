@@ -47,7 +47,8 @@ FixHeatGranCondNew::FixHeatGranCondNew(class LAMMPS *lmp, int narg, char **arg) 
   while(iarg < narg && hasargs)
   {
     hasargs = false;
-    if(strcmp(arg[iarg],"area_correction") == 0) {
+    if (strcmp(arg[iarg],"area_correction") == 0)
+    {
       if (iarg+2 > narg) error->fix_error(FLERR,this,"not enough arguments for keyword 'area_correction'");
       if(strcmp(arg[iarg+1],"yes") == 0)
         area_correction_flag = 1;
@@ -56,13 +57,23 @@ FixHeatGranCondNew::FixHeatGranCondNew(class LAMMPS *lmp, int narg, char **arg) 
       else error->fix_error(FLERR,this,"");
       iarg += 2;
       hasargs = true;
-    } else if(strcmp(style,"heat/gran/conduction_new") == 0)
-        error->fix_error(FLERR,this,"unknown keyword");
+    } 
+    else if (strcmp(arg[iarg],"fluid_thermal_conduction") == 0)
+    {
+      if (iarg+2 > narg) error->fix_error(FLERR,this,"not enough arguments");
+      cond_fluid = atof(arg[iarg+1]);
+      if(cond_fluid < 0. ) error->fix_error(FLERR,this,"invalid fluid_thermal_conduction");
+      iarg += 2;
+      hasargs = true;
+    }
+   else if(strcmp(style,"heat/gran/conduction_new") == 0)
+        error->fix_error(FLERR,this,"unknown keyword or wrong keyword order");
   }
 
   fix_conductivity = NULL;
   conductivity = NULL;
 
+  fix_heatCond = fix_heatConv = fix_heatRadiat = fix_heatExtern = NULL;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -76,7 +87,92 @@ FixHeatGranCondNew::~FixHeatGranCondNew()
 
 /* ---------------------------------------------------------------------- */
 
-// post_create() of parent is fine
+void FixHeatGranCondNew::post_create()
+{
+  // register new fluxes
+  if(!fix_heatCond)
+  {
+    char* fixarg[11];
+    fixarg[0]="conductiveHeatFlux";
+    fixarg[1]="all";
+    fixarg[2]="property/atom";
+    fixarg[3]="conductiveHeatFlux";
+    fixarg[4]="scalar";
+    fixarg[5]="no";
+    fixarg[6]="yes";
+    fixarg[7]="no";
+    fixarg[8]="0.";
+    fixarg[9]="0.";
+    fixarg[10]="0.";
+    fix_heatCond = modify->add_fix_property_atom(11,fixarg,style);
+  }
+  if(!fix_heatConv)
+  {
+    char* fixarg[11];
+    fixarg[0]="convectiveHeatFlux";
+    fixarg[1]="all";
+    fixarg[2]="property/atom";
+    fixarg[3]="convectiveHeatFlux";
+    fixarg[4]="scalar";
+    fixarg[5]="no";
+    fixarg[6]="yes";
+    fixarg[7]="no";
+    fixarg[8]="0.";
+    fixarg[9]="0.";
+    fixarg[10]="0.";
+    fix_heatConv = modify->add_fix_property_atom(11,fixarg,style);
+  }
+  if(!fix_heatRadiat)
+  {
+    char* fixarg[11];
+    fixarg[0]="radiativeHeatFlux";
+    fixarg[1]="all";
+    fixarg[2]="property/atom";
+    fixarg[3]="radiativeHeatFlux";
+    fixarg[4]="scalar";
+    fixarg[5]="no";
+    fixarg[6]="yes";
+    fixarg[7]="no";
+    fixarg[8]="0.";
+    fixarg[9]="0.";
+    fixarg[10]="0.";
+    fix_heatRadiat = modify->add_fix_property_atom(11,fixarg,style);
+  }
+  if(!fix_heatExtern)
+  {
+    char* fixarg[11];
+    fixarg[0]="externalHeatFlux";
+    fixarg[1]="all";
+    fixarg[2]="property/atom";
+    fixarg[3]="externalHeatFlux";
+    fixarg[4]="scalar";
+    fixarg[5]="no";
+    fixarg[6]="yes";
+    fixarg[7]="no";
+    fixarg[8]="0.";
+    fixarg[9]="0.";
+    fixarg[10]="0.";
+    fix_heatExtern = modify->add_fix_property_atom(11,fixarg,style);
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixHeatGranCondNew::altern_updatePtrs(){
+
+  Temp = fix_temp->vector_atom;
+  vector_atom = Temp; 
+
+  heatFlux = fix_heatFlux->vector_atom;
+  heatSource = fix_heatSource->vector_atom;
+  directionalHeatFlux = fix_directionalHeatFlux->array_atom;
+
+  conductiveHeatFlux = fix_heatCond->vector_atom;
+  convectiveHeatFlux = fix_heatConv->vector_atom;
+  radiativeHeatFlux = fix_heatRadiat->vector_atom;
+  externalHeatFlux = fix_heatExtern->vector_atom;
+
+}
 
 /* ---------------------------------------------------------------------- */
 
