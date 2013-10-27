@@ -19,6 +19,11 @@
    See the README file in the top-level directory.
 ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------
+   Contributing authors:
+   Andrei Malinouski
+------------------------------------------------------------------------- */
+
 #include "fix_heat_gran_conduction_new.h"
 
 #include "atom.h"
@@ -31,6 +36,7 @@
 #include "modify.h"
 #include "neigh_list.h"
 #include "pair_gran.h"
+#include "stdlib.h"
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -42,7 +48,7 @@ FixHeatGranCondNew::FixHeatGranCondNew(class LAMMPS *lmp, int narg, char **arg) 
   int iarg = 5;
 
   area_correction_flag = 0;
-
+  cond_fluid = 0.; //default value - non-conducting fluid
   bool hasargs = true;
   while(iarg < narg && hasargs)
   {
@@ -158,7 +164,8 @@ void FixHeatGranCondNew::post_create()
 
 /* ---------------------------------------------------------------------- */
 
-void FixHeatGranCondNew::altern_updatePtrs(){
+void FixHeatGranCondNew::altern_updatePtrs()
+{
 
   Temp = fix_temp->vector_atom;
   vector_atom = Temp; 
@@ -205,8 +212,13 @@ void FixHeatGranCondNew::init()
     FixHeatGran::init();
   }
 
-  int max_type = pair_gran->mpg->max_type();
+  fix_heatCond = static_cast<FixPropertyAtom*>(modify->find_fix_property("conductiveHeatFlux","property/atom","scalar",0,0,style));
+  fix_heatConv = static_cast<FixPropertyAtom*>(modify->find_fix_property("convectiveHeatFlux","property/atom","scalar",0,0,style));
+  fix_heatRadiat = static_cast<FixPropertyAtom*>(modify->find_fix_property("radiativeHeatFlux","property/atom","scalar",0,0,style)); 
+  fix_heatExtern = static_cast<FixPropertyAtom*>(modify->find_fix_property("externalHeatFlux","property/atom","scalar",0,0,style));
+  altern_updatePtrs();
 
+  int max_type = pair_gran->mpg->max_type();
   if (conductivity) delete []conductivity;
   conductivity = new double[max_type];
   fix_conductivity = static_cast<FixPropertyGlobal*>(modify->find_fix_property("thermalConductivity","property/global","peratomtype",max_type,0,style));
@@ -254,7 +266,7 @@ void FixHeatGranCondNew::init()
     deltan_ratio = static_cast<FixPropertyGlobal*>(modify->find_fix_property("youngsModulusOriginal","property/global","peratomtype",max_type,0,style))->get_array_modified();
   }
 
-  updatePtrs();
+  altern_updatePtrs();
 
   // error checks on coarsegraining
   if(force->cg_active())
@@ -285,12 +297,13 @@ void FixHeatGranCondNew::cpl_evaluate(ComputePairGranLocal *caller)
 template <int HISTFLAG>
 void FixHeatGranCondNew::post_force_eval(int vflag,int cpl_flag)
 {
-  double hc,contactArea,delta_n,flux,dirFlux[3];
+  double hc1,hc2,contactArea,delta_n,flux,dirFlux[3];
   int i,j,ii,jj,inum,jnum;
   double xtmp,ytmp,ztmp,delx,dely,delz;
   double radi,radj,radsum,rsq,r,rinv,rsqinv,tcoi,tcoj;
   int *ilist,*jlist,*numneigh,**firstneigh;
   int *touch,**firsttouch;
+  double  displ, alpha, beta, cosTeta0, cosTetaC,rij;//
 
   int newton_pair = force->newton_pair;
 
@@ -312,7 +325,7 @@ void FixHeatGranCondNew::post_force_eval(int vflag,int cpl_flag)
   int nlocal = atom->nlocal;
   int *mask = atom->mask;
 
-  updatePtrs();
+  altern_updatePtrs();
 
   // loop over neighbors of my atoms
   for (ii = 0; ii < inum; ii++) {
@@ -325,77 +338,80 @@ void FixHeatGranCondNew::post_force_eval(int vflag,int cpl_flag)
     jnum = numneigh[i];
     if(HISTFLAG) touch = firsttouch[i];
 
-    for (jj = 0; jj < jnum; jj++) {
+    conductiveHeatFlux[i] = 0.;
+    radiativeHeatFlux[i] = 0.;
+    convectiveHeatFlux[i] = 0.;//resetting from the previous step. heatFlux is set in ste module. This step  may be moved there later
+    for (jj = 0; jj < jnum; jj++)
+      {
       j = jlist[jj];
       j &= NEIGHMASK;
 
       if (!(mask[i] & groupbit) && !(mask[j] & groupbit)) continue;
 
-      if(!HISTFLAG)
-      {
         delx = xtmp - x[j][0];
         dely = ytmp - x[j][1];
         delz = ztmp - x[j][2];
         rsq = delx*delx + dely*dely + delz*delz;
         radj = radius[j];
         radsum = radi + radj;
-      }
-
-      if (HISTFLAG && touch[jj] || !HISTFLAG && (rsq < radsum*radsum)) {  //contact
-        
-        if(HISTFLAG)
-        {
-          delx = xtmp - x[j][0];
-          dely = ytmp - x[j][1];
-          delz = ztmp - x[j][2];
-          rsq = delx*delx + dely*dely + delz*delz;
-          radj = radius[j];
-          radsum = radi + radj;
-          if(rsq >= radsum*radsum) continue;
-        }
-
         r = sqrt(rsq);
-
-        if(area_correction_flag)
-        {
-          delta_n = radsum - r;
-          delta_n *= deltan_ratio[type[i]-1][type[j]-1];
-          r = radsum - delta_n;
-        }
-
-        contactArea = - M_PI/4 * ( (r-radi-radj)*(r+radi-radj)*(r-radi+radj)*(r+radi+radj) )/(r*r); //contact area of the two spheres
-
+	displ = 0.5*(r - radsum);
+	rij = radi; //////////////////////////////////////////solid angle?
         tcoi = conductivity[type[i]-1];
-        tcoj = conductivity[type[j]-1];
-        if (tcoi < SMALL || tcoj < SMALL) hc = 0.;
-        else hc = 4.*tcoi*tcoj/(tcoi+tcoj)*sqrt(contactArea);
+    	tcoj = conductivity[type[j]-1];
+	alpha = (tcoi*tcoj*cond_fluid)*(4*radi*radj)/(radsum* (tcoi*tcoj+tcoj*cond_fluid+tcoi*cond_fluid) );//with effective radius for polydisperse
+	beta = cond_fluid*((2*radi*radj)/(radsum)+displ);
+	cosTeta0 = ((2*radi*radj)/(radsum)+displ)/sqrt(((2*radi*radj)/(radsum)+displ)*((2*radi*radj)/(radsum)+displ)+rij*rij);
 
-        flux = (Temp[j]-Temp[i])*hc;
+      if (rsq < radsum*radsum)
+	     {  //contact
+ 		   if(area_correction_flag)
+    		    {
+    		      delta_n = radsum - r;
+    		      delta_n *= deltan_ratio[type[i]-1][type[j]-1];
+   		      r = radsum - delta_n;
+    		    }
+	
+    		    contactArea = - M_PI/4 * ( (r-radi-radj)*(r+radi-radj)*(r-radi+radj)*(r+radi+radj) )/(r*r); //contact area of the two spheres
 
-        dirFlux[0] = flux*delx;
-        dirFlux[1] = flux*dely;
-        dirFlux[2] = flux*delz;
-        if(!cpl_flag)
-        {
-          //Add half of the flux (located at the contact) to each particle in contact
-          heatFlux[i] += flux;
-          directionalHeatFlux[i][0] += 0.50 * dirFlux[0];
-          directionalHeatFlux[i][1] += 0.50 * dirFlux[1];
-          directionalHeatFlux[i][2] += 0.50 * dirFlux[2];
-          if (newton_pair || j < nlocal)
-          {
-            heatFlux[j] -= flux;
-            directionalHeatFlux[j][0] += 0.50 * dirFlux[0];
-            directionalHeatFlux[j][1] += 0.50 * dirFlux[1];
-            directionalHeatFlux[j][2] += 0.50 * dirFlux[2];
-          }
+     		   if (tcoi < SMALL || tcoj < SMALL) hc1 = 0.;
+     		   else hc1 = 4.*tcoi*tcoj/(tcoi+tcoj)*sqrt(contactArea);//through contact spot
 
-        }
+   		   conductiveHeatFlux[i]+= (Temp[j]-Temp[i])*hc1;
+		   cosTetaC = ((2*radi*radj)/(radsum)+displ)/sqrt(((2*radi*radj)/(radsum)+displ)*((2*radi*radj)/(radsum)+displ)+contactArea);
+		   hc2 = M_PI*beta*log((beta-alpha*cosTeta0)/(beta-alpha*cosTetaC));//conduction through fluid layer
+		   convectiveHeatFlux[i] += (Temp[j]-Temp[i])*hc2;
+    	     }
+	     else//no direct contact; only through gas layer
+	     {
+		hc2 = M_PI*beta*log((beta-alpha*cosTeta0)/(beta-alpha));
+		conductiveHeatFlux[i] += 0.;
+		convectiveHeatFlux[i] += (Temp[j]-Temp[i])*hc2;
+	      }
+		flux = (Temp[j]-Temp[i])*(hc1+hc2);
+	             dirFlux[0] = flux*delx;
+   		     dirFlux[1] = flux*dely;
+   		     dirFlux[2] = flux*delz;
+    		    if(!cpl_flag)
+   		     {
+   		     	  //Add half of the flux (located at the contact) to each particle in contact
+    		    	  heatFlux[i] += flux;
+    		    	  directionalHeatFlux[i][0] += 0.50 * dirFlux[0];
+     		   	  directionalHeatFlux[i][1] += 0.50 * dirFlux[1];
+     		   	  directionalHeatFlux[i][2] += 0.50 * dirFlux[2];
+    		   	   if (newton_pair || j < nlocal)
+    		   	   {
+        		    heatFlux[j] -= flux;
+   		     	    directionalHeatFlux[j][0] += 0.50 * dirFlux[0];
+   		   	    directionalHeatFlux[j][1] += 0.50 * dirFlux[1];
+  		            directionalHeatFlux[j][2] += 0.50 * dirFlux[2];
+    		           }
 
-        if(cpl_flag && cpl) cpl->add_heat(i,j,flux);
-      }
-    }
-  }
+      		     }
+
+        	     if(cpl_flag && cpl) cpl->add_heat(i,j,flux);
+     }//end of jj cycle
+  }//end of ii cycle
 
   if(newton_pair) fix_heatFlux->do_reverse_comm();
   if(newton_pair) fix_directionalHeatFlux->do_reverse_comm();
